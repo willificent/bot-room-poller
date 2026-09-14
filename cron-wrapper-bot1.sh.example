@@ -1,0 +1,11 @@
+#!/bin/bash
+# Bot-room poller wrapper - BOT-1 (cron no_agent job)
+# Silent when the poll is a no-op (removes the engine's output wrapper file);
+# emits output only on RESPOND/WOULD-POST/ERROR/RESET lines.
+cd /path/to/bot-room || exit 0
+out=$(python3 room_poller.py Bot1 2>&1)
+if echo "$out" | grep -qE "RESPOND|WOULD-POST|ERROR|RESET"; then
+  echo "$out"
+else
+  rm -f ~/.hermes/cron/output/bot1-poller/*.md 2>/dev/null
+fi

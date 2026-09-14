@@ -1,0 +1,7 @@
+{
+  "user_id": "USER_ID_BOT_2",
+  "token_file": "~/.config/bot-room-poller/bot2.env",
+  "token_var": "MATTERMOST_TOKEN",
+  "judge_key_file": "~/.config/bot-room-poller/llm-key.env",
+  "dry_run": true
+}
