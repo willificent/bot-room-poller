@@ -285,7 +285,19 @@ def main():
     for p in posts:
         who = HUMANS.get(p["user_id"]) or BOTS.get(p["user_id"]) or p["user_id"]
         msg = re.sub(r"^@[A-Za-z0-9_\-]+\s*", "", p["message"])  # judge sees clean text
-        transcript_lines.append(f"{who}: {msg[:1500]}")
+        # cap long messages WITHOUT clipping the tail: head + labeled elision + tail.
+        # Endings matter most for turn-taking (questions, closes, decisions live at
+        # the end); a blind [:1500] slice makes long posts LOOK truncated to the
+        # sibling and triggered the 14:23 "cut off mid-sentence" complaint chain.
+        if len(msg) > 2400:
+            keep = 1200
+            msg = (msg[:keep] + f"\n…[message continues, {len(msg) - 2*keep} chars elided]…\n"
+                   + msg[-keep:])
+        elif len(msg) > 1500:
+            # moderate length: keep head and tail, tiny elision
+            keep = 750
+            msg = (msg[:keep] + f"\n…[{len(msg) - 2*keep} chars elided]…\n" + msg[-keep:])
+        transcript_lines.append(f"{who}: {msg}")
     transcript = "\n".join(transcript_lines)
     author = HUMANS.get(latest["user_id"]) or BOTS.get(latest["user_id"]) or latest["user_id"]
 
