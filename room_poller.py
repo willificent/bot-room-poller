@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Bot-room poller — pull-based turn-taking.
+"""Bot-room poller — pull-based turn-taking (v3 final, production-pattern).
 
-Shared script, two bot configs (bot1.json / bot2.json). Each invocation:
+Shared script, two agent configs (bot1.json / bot2.json). Each invocation:
   Gate 1 (free, deterministic): new message? ball in my court? cooldown? mention?
   Gate 2 (gemma4:31b-cloud judge): should I respond?
   Stage 3 (only on YES): full agent one-shot turn on the sibling session, post via REST.
@@ -12,7 +12,7 @@ Dry-run mode: full decision path runs, but nothing is posted and stage 3 is skip
 import json, os, re, subprocess, sys, time, urllib.request
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-CHANNEL_ID = "YOUR_CHANNEL_ID"  # from the channel page URL
+CHANNEL_ID = "YOUR_CHANNEL_ID"
 MM_URL = "https://mattermost.example.com/api/v4"
 OLLAMA_URL = "http://127.0.0.1:11434/v1/chat/completions"
 JUDGE_MODEL = "gemma4:31b-cloud"
@@ -20,12 +20,12 @@ INFLIGHT = os.path.join(BASE, "inflight.json")
 INFLIGHT_TTL = 480          # seconds; a crashed lock expires
 COOLDOWN_S = 180            # min gap between own replies
 SESSION_IDLE_RESET_S = 600  # >=10 min quiet -> fresh sibling session at next start
-HISTORY_N = 10
+HISTORY_N = 20
 STAGE3_TIMEOUT = 420
 
 HUMANS = {"USER_ID_HUMAN_1": "Human-1", "USER_ID_HUMAN_2": "Human-2"}
 BOTS = {"USER_ID_BOT_1": "Bot-1", "USER_ID_BOT_2": "Bot-2"}
-# argv key -> display identity (single source of truth for logs/sessions/frames)
+# argv key -> display identity
 AGENT_NAMES = {"Bot1": "Bot-1", "Bot2": "Bot-2"}
 
 
@@ -152,12 +152,13 @@ Transcript (oldest first; last line is the latest):
 def run_stage3(agent, cfg, transcript, st):
     """Full agent one-shot turn on the persistent sibling session."""
     sibling = "Bot-2" if agent == "Bot-1" else "Bot-1"
-    frame = f"""You are {agent}, in the Mattermost group room "Bot Room" with the humans Human-1 and Human-2,
+    frame = f"""You are {agent}, in the Mattermost group room "Bot Room" with the humans,
 and your sibling agent {sibling}. This is a casual sibling conversation — be warm, natural,
 conversational. Reply to the LATEST message only. Keep it chat-length: 1-4 short paragraphs
 maximum, no headers, no bullet lists unless listing something real, no sign-offs or "Great chat!"
-closers, no repeating earlier pleasantries. Do not use tools unless the message genuinely
-requires one. If the conversation has wound down socially, a brief warm send-off is fine —
+closers, no repeating earlier pleasantries. Do not use tools at all — no file reads, no code runs, no searches. Your reply is
+pure conversation. Never emit tool-progress or interim commentary; your ENTIRE output
+is the chat message itself. If the conversation has wound down socially, a brief warm send-off is fine —
 do not extend it.
 
 Recent transcript (oldest first):
@@ -179,10 +180,47 @@ Write {agent}'s next chat message now. Output ONLY the message text."""
                 "--oneshot", "-Q", "--max-turns", "6",
                 "--continue", st["session_name"], "--create-if-missing"])
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=STAGE3_TIMEOUT)
-    out = (r.stdout or "").strip()
+    out = extract_final_reply(r.stdout or "")
     if not out:
         raise RuntimeError(f"stage3 empty rc={r.returncode} stderr={r.stderr[-300:]}")
     return out
+
+
+# interim stdout blocks that are tool progress, not the final reply
+_PROGRESS_RE = re.compile(r"^\s*(?:🐍|📖|✍|📝|⚙|🔍|🌐|🧠|📎|⏳|↻|👁|💾|📄|🤖|🔧|⚡|🧩|💬|📌|🗓|✅|❌|\(×\d\))")
+
+
+def extract_final_reply(stdout: str) -> str:
+    """hermes chat --oneshot stdout may contain interim assistant messages emitted
+    between tool calls; the FINAL reply is the last block. Tool-progress lines
+    (emoji-prefixed) are stripped; blank-line-separated blocks are then split and
+    the last non-empty block is returned. Single-message turns are unaffected."""
+    lines = [ln for ln in stdout_lines(stdout)
+             if not _PROGRESS_RE.match(ln)]
+    blocks, cur = [], []
+    for ln in lines:
+        if ln.strip() == "":
+            if cur:
+                blocks.append("\n".join(cur))
+                cur = []
+        else:
+            cur.append(ln.rstrip())
+    if cur:
+        blocks.append("\n".join(cur))
+    if not blocks:
+        return ""
+    final = blocks[-1].strip()
+    # safety net: if the last block is tiny but an earlier block is substantial,
+    # prefer the substantial one (last-is-final heuristic can be fooled)
+    if len(final) < 40:
+        substantial = [b for b in blocks if len(b.strip()) >= 80]
+        if substantial:
+            final = substantial[-1].strip()
+    return final
+
+
+def stdout_lines(stdout: str):
+    return stdout.replace("\r\n", "\n").split("\n")
 
 
 def main():
@@ -219,7 +257,13 @@ def main():
         log(agent, "SKIPPED", "cooldown after own reply"); return
 
     ltext = latest["message"]
+    # strip a leading @handle for judging — bot-to-bot replies carry one for human
+    # readability; without stripping, the judge would read "addressed to another
+    # member" and skip the reply its own sibling just sent
     if any(f"@{v.lower()}" in ltext.lower() for v in BOTS.values()):
+        # a mention of one of us = addressed to a bot specifically.
+        # if it's MY mention: my gateway handles it natively (poller stands down).
+        # if it's my SIBLING's mention: not my turn either — their machinery owns it.
         st["last_seen_msg_id"] = latest["id"]; save_state(agent, st)
         log(agent, "SKIPPED", "explicit mention — gateway owns this turn"); return
 
@@ -237,7 +281,8 @@ def main():
     transcript_lines = []
     for p in posts:
         who = HUMANS.get(p["user_id"]) or BOTS.get(p["user_id"]) or p["user_id"]
-        transcript_lines.append(f"{who}: {p['message'][:500]}")
+        msg = re.sub(r"^@[A-Za-z0-9_\-]+\s*", "", p["message"])  # judge sees clean text
+        transcript_lines.append(f"{who}: {msg[:1500]}")
     transcript = "\n".join(transcript_lines)
     author = HUMANS.get(latest["user_id"]) or BOTS.get(latest["user_id"]) or latest["user_id"]
 
@@ -260,6 +305,9 @@ def main():
             st["last_seen_msg_id"] = latest["id"]; save_state(agent, st)
             return
         reply = run_stage3(agent, cfg, transcript, st)
+        # if replying to my sibling, prefix their MM handle so a human can follow
+        # the thread; pollers strip the leading @handle before judging, gateways
+        # act on real mentions only (require_mention: true both sides)
         posted = api("POST", "/posts", token, {"channel_id": CHANNEL_ID, "message": reply})
         st["last_seen_msg_id"] = posted["id"]
         st["last_own_reply_at"] = int(time.time() * 1000)
