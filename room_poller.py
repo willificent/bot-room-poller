@@ -225,7 +225,7 @@ def stdout_lines(stdout: str):
 
 def main():
     agent_key = sys.argv[1]
-    agent = AGENT_NAMES[agent_key]
+    agent = {"Bot1": "Bot-1", "Bot2": "Bot-2"}[agent_key]
     with open(os.path.join(BASE, f"{agent_key.lower()}.json")) as f:
         cfg = json.load(f)
     token = read_env(os.path.expanduser(cfg["token_file"]), cfg["token_var"])
@@ -253,8 +253,10 @@ def main():
         st["last_seen_msg_id"] = latest["id"]; save_state(agent, st)
         log(agent, "SKIPPED", "own message is latest"); return
     if time.time() * 1000 - st["last_own_reply_at"] < COOLDOWN_S * 1000:
-        st["last_seen_msg_id"] = latest["id"]; save_state(agent, st)
-        log(agent, "SKIPPED", "cooldown after own reply"); return
+        # do NOT advance last_seen here: a message arriving during cooldown must
+        # still be judged after it expires, else the cooldown gate eats it and
+        # the conversation starves silently (2026-09-14 13:35 incident)
+        log(agent, "SKIPPED", "cooldown after own reply (msg left unjudged)"); return
 
     ltext = latest["message"]
     # strip a leading @handle for judging — bot-to-bot replies carry one for human
