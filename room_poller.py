@@ -120,7 +120,8 @@ with the humans Human-1 and Human-2, and {me}'s sibling agent {sibling}. Decide 
 NEW reply RIGHT NOW to the LATEST message (from {author}).
 
 Respond YES only if that message: asks a question, requests something, offers a substantive
-idea inviting engagement, or continues an active discussion where {me} has something real to add.
+idea inviting engagement, OR states a position/proposal that invites agreement, disagreement,
+or a decision (a proposal with no question mark is still an invitation to respond).
 
 Respond NO if: it is a social close ("great chat", "see you later", "sounds good", "goodnight",
 thanks, or emoji-only), it merely acknowledges, it is clearly directed at another member
